@@ -127,6 +127,8 @@ LLM_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
 
+**Note:** You'll need your own free Razorpay test-mode API keys (available at razorpay.com) and a local MySQL instance to run this project. No real credentials are included in this repository for security reasons — this is standard practice for any project handling payment integrations. The LLM_API_KEY is optional — the system falls back to a deterministic rule-based extraction if it's not provided.
+
 Create the MySQL database, then seed it:
 
 ```bash
