@@ -181,7 +181,17 @@ Vite will start on `http://localhost:5173` (falls forward to 5174, etc. if the p
 
 ## Screenshots
 
-[Add screenshots here]
+<img width="1437" height="575" alt="image" src="https://github.com/user-attachments/assets/36ccbf20-cc2a-48c5-9df6-d52298aad6aa" />
+
+<img width="1897" height="888" alt="image" src="https://github.com/user-attachments/assets/a35930d0-50e3-4ab2-9fbe-5d55ed09c65d" />
+
+<img width="1893" height="892" alt="image" src="https://github.com/user-attachments/assets/97888086-8bf9-44a7-b519-0f707cba6a3c" />
+
+<img width="1903" height="897" alt="image" src="https://github.com/user-attachments/assets/de427386-44f7-48d4-a7f3-ba7f1412e70e" />
+
+<img width="1903" height="890" alt="image" src="https://github.com/user-attachments/assets/7f42d256-a17c-4d26-9b89-1b969b6f3a64" />
+
+<img width="1903" height="887" alt="image" src="https://github.com/user-attachments/assets/01d27b1d-e1fe-4634-b4ef-78b1f4ed48e5" />
 
 ## Team / Author
 
