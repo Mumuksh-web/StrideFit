@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cd \"$env:TEMP\\\\claude\\\\f--rozarpay-buildathon\\\\161a85a6-90ef-4056-870d-cdf888501344\\\\scratchpad\"; node test2.js)",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"ProcessId=18636\")",
+      "PowerShell($env:PYTHONPATH = \"f:\\\\rozarpay-buildathon\"; & \"F:\\\\python\\\\python.exe\" \"$env:TEMP\\\\claude\\\\f--rozarpay-buildathon\\\\161a85a6-90ef-4056-870d-cdf888501344\\\\scratchpad\\\\test_dedup.py\")",
+      "PowerShell(cd \"$env:TEMP\\\\claude\\\\f--rozarpay-buildathon\\\\161a85a6-90ef-4056-870d-cdf888501344\\\\scratchpad\"; node test6.js)"
+    ]
+  }
+}
