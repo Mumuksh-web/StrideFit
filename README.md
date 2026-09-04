@@ -44,8 +44,14 @@ The goal: prove that a merchant's commerce stack can be both **conversational fo
 - Buyers can bookmark products into a local "saved for review" list
 - Merchants can mark/unmark growth insights as "under review" and flag audit-log entries for follow-up
 
+**Cross-sell suggestions at checkout**
+- When the checkout panel opens, a secondary "You might also like" strip shows 1–3 complementary products to lift average order value
+- Primary source is the merchant's own observed `cross_sell_pattern` insight for that product ("Often purchased with …"); if none matches, a database-driven fallback mines confirmed order history for co-purchased items, then falls back to the cheapest item from each other catalog category — no hardcoded names, IDs, or category lists
+- Purely additive: the endpoint never errors, and a failed/empty response just hides the strip without touching the Razorpay checkout
+
 **Razorpay Test-Mode integration**
 - Real Razorpay order creation in test mode, with simulated-failure support for demoing the failure-handling path safely
+- The buyer completes payment in the **real Razorpay-branded checkout widget** (UPI / Card / Netbanking), themed with the StrideFit accent colour; on success its `handler` calls `/payments/confirm-order` to finalise the order
 
 ## Tech Stack
 
@@ -165,9 +171,12 @@ Vite will start on `http://localhost:5173` (falls forward to 5174, etc. if the p
 | POST | `/buyer/chat` | Main conversational shopping endpoint — extracts intent, recommends real catalog products |
 | POST | `/buyer/set-name` | Set the buyer's display name for a session |
 | GET | `/buyer/chat-history/{session_id}` | Read-only chat history for persisting a session across refreshes |
-| POST | `/payments/create-order` | Create a pending Razorpay order for a product (bounded discount applied) |
+| POST | `/payments/create-order` | Create a pending order for a product (bounded discount applied) |
+| GET | `/payments/razorpay-key` | Public Razorpay Key ID for the browser checkout widget (never the secret) |
+| POST | `/payments/checkout-session` | After the buyer confirms, mint the real Razorpay order so the branded checkout widget can open |
 | POST | `/payments/confirm-order` | Confirm a pending order after explicit buyer confirmation ("The Bar" gate) |
 | GET | `/products` / `/products/{id}` | Public catalog listing |
+| GET | `/products/{id}/cross-sell` | 1–3 complementary products for the checkout panel — from a matching `cross_sell_pattern` merchant insight, else a co-purchase / category fallback (never errors) |
 | GET | `/merchant/dashboard` | Merchant KPIs — revenue, orders, AI-assisted revenue, active insights |
 | GET | `/merchant/insights` | Growth insights (cross-sell, revenue trend, top product, discount, category) |
 | PATCH | `/merchant/insights/{id}/review` | Toggle an insight between `active` and `under_review` |

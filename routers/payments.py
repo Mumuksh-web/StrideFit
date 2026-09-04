@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from config import settings
 from database import get_db
 from models import BuyerIntentRecord, Conversation, Order, Product
 from services.razorpay_service import create_order
@@ -12,6 +13,10 @@ from routers.audit import record_money_decision
 from services.negotiation_rules import MAX_DISCOUNT_PERCENT, evaluate_discount
 
 router = APIRouter()
+
+# "The Bar" — an order is only ever confirmed, and a Razorpay order only ever
+# created, after the buyer gives one of these explicit confirmation words.
+CONFIRMATION_WORDS = {"yes", "confirm", "confirmed", "haan", "han"}
 
 
 class CreateOrderRequest(BaseModel):
@@ -21,6 +26,7 @@ class CreateOrderRequest(BaseModel):
 
 class CreateOrderResponse(BaseModel):
 	order_id: str | None = None
+	razorpay_payment_id: str | None = None
 	pending_order_id: int | None = None
 	amount: Decimal
 	discount_amount: Decimal
@@ -41,6 +47,25 @@ class ConfirmOrderRequest(BaseModel):
 	session_id: str = Field(min_length=1, max_length=100)
 	confirmation: str = Field(min_length=1)
 	simulate_failure: bool = False
+	# Reference id handed back by the Razorpay checkout widget on a successful payment.
+	razorpay_payment_id: str | None = None
+
+
+class CheckoutSessionRequest(BaseModel):
+	pending_order_id: int = Field(gt=0)
+	session_id: str = Field(min_length=1, max_length=100)
+	confirmation: str = Field(min_length=1)
+
+
+class CheckoutSessionResponse(BaseModel):
+	razorpay_order_id: str
+	amount: int  # in paise, ready to hand straight to the Razorpay checkout widget
+	currency: str
+	description: str
+
+
+class RazorpayKeyResponse(BaseModel):
+	key_id: str
 
 
 @router.post("/create-order", response_model=CreateOrderResponse)
@@ -97,12 +122,94 @@ def create_product_order(
 	)
 
 
+@router.get("/razorpay-key", response_model=RazorpayKeyResponse)
+def get_razorpay_key() -> RazorpayKeyResponse:
+	"""Expose ONLY the public Razorpay Key ID for the browser checkout widget.
+
+	The Key ID is meant to ship to the client (every Razorpay integration renders
+	it in the page); the Key Secret never leaves the server.
+	"""
+	if not settings.razorpay_key_id:
+		raise HTTPException(status_code=503, detail="Razorpay key id is not configured")
+	return RazorpayKeyResponse(key_id=settings.razorpay_key_id)
+
+
+@router.post(
+	"/checkout-session",
+	response_model=CheckoutSessionResponse | PaymentFailureResponse,
+)
+def create_checkout_session(
+	request: CheckoutSessionRequest,
+	db: Session = Depends(get_db),
+) -> CheckoutSessionResponse:
+	"""Turn a confirmed pending order into a real Razorpay order.
+
+	Runs the moment the buyer clicks "Confirm order" — still behind the explicit
+	confirmation gate — so the frontend has a ``razorpay_order_id`` to open the
+	branded Razorpay checkout against. The order stays ``pending_confirmation``
+	until the payment succeeds in the widget and /confirm-order finalises it.
+	"""
+	if request.confirmation.strip().lower() not in CONFIRMATION_WORDS:
+		raise HTTPException(status_code=400, detail="Explicit yes/confirm is required")
+
+	conversation = db.scalar(select(Conversation).where(Conversation.session_id == request.session_id))
+	buyer_id = conversation.buyer_id if conversation and conversation.buyer_id != "guest" else request.session_id
+	order = db.scalar(
+		select(Order).where(
+			Order.id == request.pending_order_id,
+			Order.buyer_id == buyer_id,
+			Order.status == "pending_confirmation",
+		)
+	)
+	if order is None:
+		raise HTTPException(status_code=404, detail="Pending order not found")
+
+	product_name = order.items[0]["name"] if order.items else "StrideFit order"
+
+	if order.razorpay_order_id is None:
+		try:
+			razorpay_order = create_order(order.total_amount, order.currency)
+		except Exception as error:
+			order.status = "failed"
+			record_money_decision(
+				db,
+				action_type="payment_failed",
+				reason=str(error),
+				limit_check_passed=True,
+				entity_id=str(order.id),
+				actor_id=buyer_id,
+			)
+			db.commit()
+			return PaymentFailureResponse(
+				message="Maaf kijiye, payment process karne mein dikkat aa rahi hai. Aapke account se koi paisa deduct NAHI hua hai. Kripya thodi der baad dobara try karein.",
+			)
+		order.razorpay_order_id = razorpay_order["id"]
+		record_money_decision(
+			db,
+			action_type="checkout_session_created",
+			reason="Buyer confirmed checkout; Razorpay order created for the final amount, awaiting payment in the Razorpay checkout widget.",
+			limit_check_passed=order.discount_amount
+			<= order.subtotal * Decimal(MAX_DISCOUNT_PERCENT) / Decimal("100"),
+			entity_id=str(order.id),
+			actor_id=buyer_id,
+		)
+		db.commit()
+
+	amount_in_paise = int((order.total_amount * Decimal("100")).quantize(Decimal("1")))
+	return CheckoutSessionResponse(
+		razorpay_order_id=order.razorpay_order_id,
+		amount=amount_in_paise,
+		currency=order.currency,
+		description=f"Order for {product_name}",
+	)
+
+
 @router.post("/confirm-order", response_model=CreateOrderResponse | PaymentFailureResponse)
 def confirm_product_order(
 	request: ConfirmOrderRequest,
 	db: Session = Depends(get_db),
 ) -> CreateOrderResponse:
-	if request.confirmation.strip().lower() not in {"yes", "confirm", "confirmed", "haan", "han"}:
+	if request.confirmation.strip().lower() not in CONFIRMATION_WORDS:
 		raise HTTPException(status_code=400, detail="Explicit yes/confirm is required")
 
 	conversation = db.scalar(select(Conversation).where(Conversation.session_id == request.session_id))
@@ -120,7 +227,12 @@ def confirm_product_order(
 	try:
 		if request.simulate_failure:
 			raise RuntimeError("Simulated Razorpay gateway failure for demo testing")
-		razorpay_order = create_order(order.total_amount, order.currency)
+		# /checkout-session usually already created the Razorpay order when the
+		# buyer opened the checkout widget — reuse it, don't create a second one.
+		if order.razorpay_order_id:
+			razorpay_order = {"id": order.razorpay_order_id}
+		else:
+			razorpay_order = create_order(order.total_amount, order.currency)
 	except Exception as error:
 		order.status = "failed"
 		record_money_decision(
@@ -137,6 +249,8 @@ def confirm_product_order(
 		)
 
 	order.razorpay_order_id = razorpay_order["id"]
+	if request.razorpay_payment_id:
+		order.razorpay_payment_id = request.razorpay_payment_id
 	order.status = "confirmed"
 	latest_intent = db.scalar(
 		select(BuyerIntentRecord)
@@ -156,6 +270,7 @@ def confirm_product_order(
 	db.commit()
 	return CreateOrderResponse(
 		order_id=order.razorpay_order_id,
+		razorpay_payment_id=order.razorpay_payment_id,
 		amount=order.subtotal,
 		discount_amount=order.discount_amount,
 		final_amount=order.total_amount,

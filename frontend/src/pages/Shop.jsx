@@ -61,6 +61,8 @@ export default function Shop() {
   const [needsName, setNeedsName] = useState(false)
   const [products, setProducts] = useState([])
   const [checkout, setCheckout] = useState(null)
+  const [crossSell, setCrossSell] = useState([])
+  const [crossSellLoading, setCrossSellLoading] = useState(false)
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [naming, setNaming] = useState(false)
@@ -139,14 +141,33 @@ export default function Shop() {
     }
   }
 
+  // Secondary, non-blocking: complementary product suggestions for the checkout panel.
+  // Any failure just hides the section — it must never surface an error or block checkout.
+  async function loadCrossSell(productId) {
+    setCrossSell([])
+    setCrossSellLoading(true)
+    try {
+      const response = await fetch(`${API_BASE}/products/${productId}/cross-sell`)
+      if (!response.ok) throw new Error('cross-sell unavailable')
+      const data = await response.json()
+      setCrossSell(Array.isArray(data) ? data.slice(0, 3) : [])
+    } catch {
+      setCrossSell([])
+    } finally {
+      setCrossSellLoading(false)
+    }
+  }
+
   async function selectProduct(productId) {
     setSelecting(true)
     setError('')
     setResult(null)
+    setCrossSell([])
     try {
       const response = await fetch(`${API_BASE}/payments/create-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ product_id: productId, session_id: sessionId }) })
       if (!response.ok) throw new Error('Checkout could not be prepared. Please try again.')
       setCheckout(await response.json())
+      loadCrossSell(productId)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -156,16 +177,62 @@ export default function Shop() {
 
   async function confirmOrder() {
     if (!checkout || confirming) return
+    const pendingOrderId = checkout.pending_order_id
     setConfirming(true)
     setError('')
+    setResult(null)
     try {
-      const response = await fetch(`${API_BASE}/payments/confirm-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pending_order_id: checkout.pending_order_id, session_id: sessionId, confirmation: 'yes' }) })
+      // 1. Explicit-confirmation gate → backend mints the real Razorpay order for the final amount.
+      const sessionResponse = await fetch(`${API_BASE}/payments/checkout-session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pending_order_id: pendingOrderId, session_id: sessionId, confirmation: 'yes' }) })
+      const session = await sessionResponse.json()
+      if (!sessionResponse.ok) throw new Error(session.detail || 'Could not start Razorpay checkout.')
+      if (session.status === 'failed') { setResult(session); setCheckout(null); setConfirming(false); return }
+
+      // 2. Fetch ONLY the public Razorpay Key ID (the secret never leaves the server).
+      const keyResponse = await fetch(`${API_BASE}/payments/razorpay-key`)
+      const keyData = await keyResponse.json()
+      if (!keyResponse.ok || !keyData.key_id) throw new Error('Razorpay key unavailable — check RAZORPAY_KEY_ID in the backend .env.')
+      if (typeof window.Razorpay !== 'function') throw new Error('Razorpay checkout script did not load. Check your connection and retry.')
+
+      // 3. Open the Razorpay-branded popup (UPI / Card / Netbanking, Razorpay logo).
+      const rzp = new window.Razorpay({
+        key: keyData.key_id,
+        amount: session.amount, // already in paise, straight from the backend
+        currency: session.currency,
+        order_id: session.razorpay_order_id, // the order created in step 1
+        name: 'StrideFit',
+        description: session.description,
+        theme: { color: '#9B8CFF' }, // StrideFit accent
+        handler: (response) => finalizeOrder(response, pendingOrderId),
+        modal: {
+          ondismiss: () => {
+            setConfirming(false)
+            setError('Payment window band ho gaya — order abhi confirm nahi hua. "Confirm order" se dobara try kar sakte hain.')
+          },
+        },
+      })
+      rzp.on('payment.failed', (response) => {
+        setConfirming(false)
+        setError(response?.error?.description || 'Razorpay payment failed. Please try again.')
+      })
+      rzp.open()
+    } catch (requestError) {
+      setError(requestError.message)
+      setConfirming(false)
+    }
+  }
+
+  async function finalizeOrder(razorpayResponse, pendingOrderId) {
+    setError('')
+    try {
+      // 4. Payment succeeded inside the widget → run the existing confirm-order "Bar" gate.
+      const response = await fetch(`${API_BASE}/payments/confirm-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pending_order_id: pendingOrderId, session_id: sessionId, confirmation: 'yes', razorpay_payment_id: razorpayResponse?.razorpay_payment_id }) })
       const data = await response.json()
       if (!response.ok) throw new Error(data.detail || 'Payment confirmation failed.')
       if (data.status === 'failed') {
         setResult(data)
       } else {
-        setResult({ ...data, status: 'success' })
+        setResult({ ...data, status: 'success', razorpay_payment_id: razorpayResponse?.razorpay_payment_id })
       }
       setCheckout(null)
     } catch (requestError) {
@@ -178,5 +245,5 @@ export default function Shop() {
   return <main className="min-h-screen bg-background px-4 py-5 font-body text-text-primary sm:px-8 lg:px-12"><div className="mx-auto max-w-7xl"><header className="flex items-center justify-between border-b border-border pb-5"><div className="flex items-center gap-3"><Logo /><div><p className="font-heading text-xl font-bold">StrideFit</p><p className="text-xs text-text-muted">Your everyday movement, upgraded.</p></div></div><div className="flex items-center gap-3"><Link className="rounded-lg border border-border px-3 py-2 text-xs font-semibold text-text-muted transition hover:border-accent-start/70 hover:text-text-primary" to="/catalog">Catalog</Link><Link className="rounded-lg border border-border px-3 py-2 text-xs font-semibold text-text-muted transition hover:border-accent-start/70 hover:text-text-primary" to="/dashboard">View as Merchant</Link><AppStatus variant="warning">TEST MODE</AppStatus></div></header>
     {error && <div className="mt-5 rounded-xl border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-red-200">{error}</div>}
     <div className="grid gap-6 py-7 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]"><section className="flex min-h-[650px] flex-col"><div className="mb-5"><p className="text-sm font-semibold uppercase tracking-[0.18em] text-accent-start">Personal shopper</p><h1 className="mt-2 font-heading text-3xl font-bold">Find your next stride.</h1><p className="mt-2 text-sm text-text-muted">Tell me what you need, and I&apos;ll keep the recommendations grounded in the StrideFit catalog.</p></div><Card className="flex flex-1 flex-col p-4"><div className="flex-1 space-y-3 overflow-y-auto pr-1">{historyLoading ? <div className="space-y-3"><div className="h-14 w-2/3 animate-pulse rounded-2xl bg-surface" /><div className="ml-auto h-10 w-1/2 animate-pulse rounded-2xl bg-surface" /></div> : messages.map((item, index) => <Message key={`${item.role}-${index}`} role={item.role}>{item.text}</Message>)}{loading && <Message role="agent"><span className="animate-pulse text-text-muted">Thinking through the catalog…</span></Message>}</div>{needsName && <form className="mt-4 border-t border-border pt-4" onSubmit={saveName}><label className="text-sm font-semibold">What should I call you?</label><div className="mt-2 flex gap-2"><input className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2.5 text-sm outline-none placeholder:text-text-muted focus:border-accent-start" value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /><Button disabled={naming}>{naming ? 'Saving…' : 'Save name'}</Button></div></form>}<form className="mt-4 flex gap-2 border-t border-border pt-4" onSubmit={sendMessage}><input className="min-w-0 flex-1 rounded-lg border border-border bg-background px-4 py-3 text-sm outline-none placeholder:text-text-muted focus:border-accent-start" value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Try: running shoes under ₹3000" /><Button disabled={loading || !message.trim()}>Send</Button></form></Card></section>
-      <section><div className="mb-5 flex items-end justify-between"><div><p className="text-sm font-semibold uppercase tracking-[0.18em] text-accent-start">StrideFit catalog</p><h2 className="mt-2 font-heading text-2xl font-bold">Recommended for you</h2></div><span className="text-sm text-text-muted">{products.length} matches</span></div>{products.length ? <div className="grid gap-4 sm:grid-cols-2">{products.map((product) => <ProductCard key={product.id} product={product} onSelect={selectProduct} selecting={selecting} />)}</div> : <Card className="flex min-h-[300px] items-center justify-center text-center"><div><p className="font-heading text-xl font-semibold">Your shortlist will appear here.</p><p className="mt-2 max-w-sm text-sm leading-6 text-text-muted">Start a conversation to get real-time recommendations from the StrideFit catalog.</p></div></Card>}{checkout && <Card className="mt-5 border-accent-start/40 bg-surface p-5"><div className="flex items-center justify-between"><div><p className="text-sm font-semibold uppercase tracking-wider text-accent-start">Checkout review</p><h3 className="mt-1 font-heading text-xl font-bold">Ready when you are.</h3></div><AppStatus variant="warning">Confirmation needed</AppStatus></div><div className="mt-5 space-y-3 text-sm"><div className="flex justify-between text-text-muted"><span>Original amount</span><span className="text-text-primary">{formatMoney(checkout.amount)}</span></div><div className="flex justify-between text-text-muted"><span>Special discount</span><span className="text-green-300">−{formatMoney(checkout.discount_amount)}</span></div><div className="flex justify-between border-t border-border pt-3 font-semibold"><span>Final amount</span><span className="font-heading text-xl">{formatMoney(checkout.final_amount)}</span></div></div><p className="mt-4 text-xs leading-5 text-text-muted">A bounded StrideFit checkout offer has been applied. Please review the final amount before confirming.</p><div className="mt-5 flex gap-2"><Button onClick={confirmOrder} disabled={confirming}>{confirming ? 'Confirming…' : 'Confirm order'}</Button><Button variant="secondary" onClick={() => setCheckout(null)} disabled={confirming}>Cancel</Button></div></Card>}{result && <Card className={`mt-5 ${result.status === 'success' ? 'border-success/40' : 'border-danger/40'}`}><AppStatus variant={result.status === 'success' ? 'success' : 'danger'}>{result.status === 'success' ? 'Payment successful' : 'Payment failed'}</AppStatus><h3 className="mt-4 font-heading text-xl font-bold">{result.status === 'success' ? 'Your StrideFit order is confirmed.' : 'We couldn&apos;t complete that payment.'}</h3>{result.status === 'success' ? <p className="mt-2 text-sm text-text-muted">Razorpay order ID: <span className="font-mono text-text-primary">{result.order_id}</span></p> : <p className="mt-2 text-sm leading-6 text-text-muted">{result.message}</p>}</Card>}<SavedForReview /></section></div></div></main>
+      <section><div className="mb-5 flex items-end justify-between"><div><p className="text-sm font-semibold uppercase tracking-[0.18em] text-accent-start">StrideFit catalog</p><h2 className="mt-2 font-heading text-2xl font-bold">Recommended for you</h2></div><span className="text-sm text-text-muted">{products.length} matches</span></div>{products.length ? <div className="grid gap-4 sm:grid-cols-2">{products.map((product) => <ProductCard key={product.id} product={product} onSelect={selectProduct} selecting={selecting} />)}</div> : <Card className="flex min-h-[300px] items-center justify-center text-center"><div><p className="font-heading text-xl font-semibold">Your shortlist will appear here.</p><p className="mt-2 max-w-sm text-sm leading-6 text-text-muted">Start a conversation to get real-time recommendations from the StrideFit catalog.</p></div></Card>}{checkout && <Card className="mt-5 border-accent-start/40 bg-surface p-5"><div className="flex items-center justify-between"><div><p className="text-sm font-semibold uppercase tracking-wider text-accent-start">Checkout review</p><h3 className="mt-1 font-heading text-xl font-bold">Ready when you are.</h3></div><AppStatus variant="warning">Confirmation needed</AppStatus></div><div className="mt-5 space-y-3 text-sm"><div className="flex justify-between text-text-muted"><span>Original amount</span><span className="text-text-primary">{formatMoney(checkout.amount)}</span></div><div className="flex justify-between text-text-muted"><span>Special discount</span><span className="text-green-300">−{formatMoney(checkout.discount_amount)}</span></div><div className="flex justify-between border-t border-border pt-3 font-semibold"><span>Final amount</span><span className="font-heading text-xl">{formatMoney(checkout.final_amount)}</span></div></div><p className="mt-4 text-xs leading-5 text-text-muted">A bounded StrideFit checkout offer has been applied. Please review the final amount before confirming.</p><div className="mt-5 flex gap-2"><Button onClick={confirmOrder} disabled={confirming}>{confirming ? 'Confirming…' : 'Confirm order'}</Button><Button variant="secondary" onClick={() => setCheckout(null)} disabled={confirming}>Cancel</Button></div></Card>}{checkout && (crossSellLoading || crossSell.length > 0) && <Card className="mt-4 border-border/70 bg-surface/60 p-4"><div className="flex items-center justify-between"><p className="text-xs font-semibold uppercase tracking-[0.16em] text-text-muted">You might also like</p><span className="text-[11px] text-text-muted">Optional add-ons</span></div>{crossSellLoading ? <p className="mt-3 text-xs text-text-muted animate-pulse">Finding complementary picks…</p> : <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{crossSell.map((item) => <div key={item.id} onClick={() => navigate(`/product/${item.id}`)} role="button" tabIndex={0} className="cursor-pointer rounded-lg border border-border bg-background/40 px-3 py-2.5 transition hover:border-accent-start/70"><p className="text-sm font-semibold leading-tight">{item.name}</p><p className="mt-1 text-xs text-text-primary">{formatMoney(item.price)}</p>{item.reason && <p className="mt-1 text-[11px] leading-4 text-text-muted">{item.reason}</p>}</div>)}</div>}</Card>}{result && <Card className={`mt-5 ${result.status === 'success' ? 'border-success/40' : 'border-danger/40'}`}><AppStatus variant={result.status === 'success' ? 'success' : 'danger'}>{result.status === 'success' ? 'Payment successful' : 'Payment failed'}</AppStatus><h3 className="mt-4 font-heading text-xl font-bold">{result.status === 'success' ? 'Your StrideFit order is confirmed.' : 'We couldn&apos;t complete that payment.'}</h3>{result.status === 'success' ? <div className="mt-2 space-y-1 text-sm text-text-muted"><p>Razorpay order ID: <span className="font-mono text-text-primary">{result.order_id}</span></p>{result.razorpay_payment_id && <p>Razorpay payment ID: <span className="font-mono text-text-primary">{result.razorpay_payment_id}</span></p>}</div> : <p className="mt-2 text-sm leading-6 text-text-muted">{result.message}</p>}</Card>}<SavedForReview /></section></div></div></main>
 }
