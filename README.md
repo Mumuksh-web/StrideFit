@@ -209,3 +209,22 @@ Vite will start on `http://localhost:5173` (falls forward to 5174, etc. if the p
 ## License
 
 MIT
+
+## Run with Docker
+
+1. Create a `.env` file in the repo root with your Razorpay test keys (DB values are set by compose):
+   ```env
+   RAZORPAY_KEY_ID=rzp_test_xxxx
+   RAZORPAY_KEY_SECRET=xxxx
+   ```
+2. Start everything:
+   ```bash
+   docker compose up --build
+   ```
+3. In a second terminal, seed the database (one time):
+   ```bash
+   docker compose exec backend python seed_products.py
+   docker compose exec backend python seed_merchant_orders.py
+   docker compose exec backend python create_buyer_intents_table.py
+   ```
+4. Open http://localhost:5173
